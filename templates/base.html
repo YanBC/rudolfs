@@ -1,118 +1,160 @@
 <!doctype html>
 <html lang="en">
-    <head>
-        <meta charset="utf-8">
-
-        <title>{{ title }}</title>
-        <meta name="description" content="A git lfs server.">
-        <meta name="author" content="Jason White">
-
-<style>
-html {
-    font-family: Helvetica, Arial, sans-serif;
-    letter-spacing: 0.01em;
-}
-
-body {
-    line-height: 1.6;
-    color: #777;
-}
-
-h1, h2, h3, h4, h5, h6 {
-    color: #4b4b4b;
-}
-
-a {
-    color: #3b8bba;
-    text-decoration: none;
-}
-
-a:visited {
-    color: #265778;
-}
-
-pre, code {
-    font-family: Consolas, Courier, monospace;
-    color: #333;
-    background: #fafafa;
-}
-
-code {
-    padding: 0.2em 0.4em;
-    white-space: nowrap;
-}
-
-.header .content {
-    padding-left: 2em;
-    padding-right: 2em;
-}
-
-.header {
-    margin: 0 auto;
-    padding: 1em;
-    text-align: center;
-    border-bottom: 1px solid #eee;
-    letter-spacing: 0.05em;
-    max-width: 768px;
-}
-
-.header h1 {
-    font-size: 320%;
-    font-weight: 100;
-    margin: 0;
-}
-
-.header h2 {
-    font-weight: 100;
-    margin: 0;
-    color: #666;
-    letter-spacing: -0.02em;
-}
-
-.content {
-    margin-left: auto;
-    margin-right: auto;
-    max-width: 768px;
-}
-
-.content p {
-    font-size: 1.125em;
-}
-
-.code {
-    margin-left: -1em;
-    margin-right: -1em;
-    padding: 1em;
-    border: 1px solid #eee;
-    border-left-width: 0;
-    border-right-width: 0;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-}
-
-@media screen and (min-width: 48em) {
-    .code {
-        margin-left: auto;
-        margin-right: auto;
-        border-left-width: 1px;
-        border-right-width: 1px;
-    }
-}
-
-.content p code {
-    font-size: 90%;
-}
-</style>
-    </head>
-
-    <body>
-        <div id="main">
-            <div class="header">
-                {% block header %}{% endblock %}
-            </div>
-            <div class="content">
-                {% block content %}{% endblock %}
-            </div>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Connect your repository to this Rudolfs Git LFS server.">
+    <meta name="color-scheme" content="light dark">
+    <title>{{ title }} · Git LFS</title>
+    <script>
+        // Apply a saved choice before paint. Auto is handled by CSS, including without JS.
+        try {
+            const theme = localStorage.getItem('rudolfs-theme');
+            if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+        } catch (_) { /* Storage can be unavailable in private or restricted contexts. */ }
+    </script>
+    <style>
+        :root { color-scheme: light; --ink: #252b29; --muted: #626c66; --line: #e1e5df; --paper: #fff; --accent: #b74622; --green: #336444; --canvas: #f5f6f2; --badge: #e7efe6; --control-border: #8c998d; --hover: #fffaf6; --form: #fafbf8; --invalid: #b33322; --error: #a12e20; --step-border: #e4d3c8; --step-bg: #fcf4ee; --inline-code: #eef1eb; --codebar: #f5f7f2; --code-bg: #fdfefb; --code-ink: #354138; --warm: #f7eee5; --warm-border: #ebdfd2; --warm-heading: #77482e; }
+        :root[data-theme="dark"] { color-scheme: dark; --ink: #e4ebe5; --muted: #abb8ae; --line: #354139; --paper: #202923; --accent: #f3a27f; --green: #a0d6ab; --canvas: #151c18; --badge: #263c2c; --control-border: #69776e; --hover: #30362c; --form: #1c251f; --invalid: #f39886; --error: #ffae9e; --step-border: #695044; --step-bg: #382c25; --inline-code: #2e3b31; --codebar: #273129; --code-bg: #19221c; --code-ink: #c9dccb; --warm: #322c23; --warm-border: #514332; --warm-heading: #ebbd93; }
+        @media (prefers-color-scheme: dark) {
+            :root:not([data-theme="light"]) { color-scheme: dark; --ink: #e4ebe5; --muted: #abb8ae; --line: #354139; --paper: #202923; --accent: #f3a27f; --green: #a0d6ab; --canvas: #151c18; --badge: #263c2c; --control-border: #69776e; --hover: #30362c; --form: #1c251f; --invalid: #f39886; --error: #ffae9e; --step-border: #695044; --step-bg: #382c25; --inline-code: #2e3b31; --codebar: #273129; --code-bg: #19221c; --code-ink: #c9dccb; --warm: #322c23; --warm-border: #514332; --warm-heading: #ebbd93; }
+        }
+        * { box-sizing: border-box; }
+        html { scroll-behavior: smooth; scroll-padding-top: 24px; }
+        body { margin: 0; background: var(--canvas); color: var(--ink); font: 15px/1.6 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+        a { color: inherit; text-underline-offset: 4px; }
+        a:hover { color: var(--accent); }
+        button, input, select { font: inherit; }
+        button { cursor: pointer; }
+        :focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
+        .skip { position: absolute; left: 20px; top: -90px; background: var(--paper); padding: 12px; z-index: 2; }
+        .skip:focus { top: 10px; }
+        .wrap { max-width: 1160px; padding: 0 36px; margin: auto; }
+        .topbar { background: var(--paper); border-bottom: 1px solid var(--line); }
+        .topbar .wrap { display: flex; align-items: center; justify-content: space-between; min-height: 85px; gap: 24px; }
+        .brand { display: flex; align-items: center; gap: 12px; text-decoration: none; font-size: 22px; font-weight: 750; letter-spacing: -.7px; }
+        .mark { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 10px; background: #b74622; color: white; font-size: 22px; font-weight: 500; }
+        .brand small { border-left: 1px solid var(--line); margin-left: 6px; padding-left: 18px; color: var(--muted); font-size: 12px; font-weight: 500; letter-spacing: .03em; }
+        nav { display: flex; align-items: center; gap: 25px; font-size: 13px; font-weight: 600; }
+        nav a { text-decoration: none; }
+        .theme-select { background: var(--paper); color: var(--ink); border: 1px solid var(--control-border); border-radius: 6px; padding: 7px 8px; min-height: 38px; font-size: 12px; cursor: pointer; }
+        @media (max-width: 560px) { .theme-select { min-height: 44px; } }
+        main.wrap { padding-top: 48px; padding-bottom: 54px; }
+        .eyebrow { margin: 0 0 10px; color: var(--accent); text-transform: uppercase; letter-spacing: .15em; font-size: 11px; font-weight: 750; }
+        h1 { font-size: clamp(30px, 4vw, 42px); line-height: 1.2; letter-spacing: -1.6px; margin: 0 0 15px; font-weight: 650; }
+        .intro { max-width: 650px; font-size: 16px; color: var(--muted); margin: 0; }
+        .hero { display: flex; justify-content: space-between; gap: 30px; align-items: center; margin-bottom: 30px; }
+        .badge { white-space: nowrap; padding: 7px 12px; border-radius: 24px; background: var(--badge); color: var(--green); font-size: 12px; font-weight: 650; }
+        .badge::before { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--green); margin-right: 7px; vertical-align: 1px; }
+        .endpoint { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 22px 26px; border: 1px solid var(--line); background: var(--paper); border-radius: 12px; margin-bottom: 36px; }
+        .label { display: block; color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; font-weight: 650; margin-bottom: 6px; }
+        code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+        .endpoint code { font-size: 15px; overflow-wrap: anywhere; }
+        .copy { background: var(--paper); color: var(--ink); border: 1px solid var(--control-border); border-radius: 6px; padding: 7px 12px; font-size: 12px; font-weight: 600; flex-shrink: 0; }
+        .copy:disabled { opacity: .5; cursor: not-allowed; }
+        .copy:hover { border-color: var(--accent); color: var(--accent); background: var(--hover); }
+        .layout { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 28px; align-items: start; }
+        .panel { border: 1px solid var(--line); background: var(--paper); border-radius: 12px; overflow: hidden; }
+        .panel-heading { padding: 23px 26px; border-bottom: 1px solid var(--line); }
+        h2 { font-size: 18px; letter-spacing: -.4px; margin: 0; font-weight: 650; }
+        .sub { font-size: 13px; color: var(--muted); margin: 5px 0 0; }
+        .form { padding: 22px 26px; background: var(--form); border-bottom: 1px solid var(--line); }
+        .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+        label { display: block; font-size: 12px; font-weight: 650; margin-bottom: 7px; }
+        input { width: 100%; min-width: 0; background: var(--paper); border: 1px solid var(--control-border); border-radius: 6px; color: var(--ink); padding: 9px 11px; font-size: 13px; }
+        input[aria-invalid="true"] { border-color: var(--invalid); }
+        .field-help { color: var(--muted); font-size: 11px; margin: 10px 0 0; }
+        .error { color: var(--error); font-size: 12px; margin: 8px 0 0; }
+        [hidden] { display: none !important; }
+        .step { padding: 25px 26px 26px; border-bottom: 1px solid var(--line); }
+        .step:last-child { border-bottom: 0; }
+        .step-title { display: flex; gap: 11px; align-items: center; margin-bottom: 10px; }
+        .number { display: grid; place-items: center; width: 25px; height: 25px; flex-shrink: 0; border: 1px solid var(--step-border); background: var(--step-bg); color: var(--accent); border-radius: 50%; font-size: 11px; font-weight: 700; }
+        h3 { font-size: 14px; font-weight: 650; margin: 0; }
+        .step p { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
+        p code { font-size: .92em; background: var(--inline-code); padding: 2px 4px; border-radius: 3px; color: var(--ink); overflow-wrap: anywhere; }
+        .codebox { border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+        .codebar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 7px 12px; background: var(--codebar); border-bottom: 1px solid var(--line); font-size: 11px; color: var(--muted); }
+        .codebar .copy { border-color: transparent; padding: 3px 7px; background: transparent; }
+        pre { margin: 0; padding: 16px; background: var(--code-bg); color: var(--code-ink); font-size: 12px; line-height: 1.9; overflow-x: auto; tab-size: 2; }
+        .after-code { margin: 12px 0 0 !important; }
+        .aside-card { padding: 23px; border-radius: 12px; border: 1px solid var(--line); background: var(--paper); margin-bottom: 20px; }
+        .aside-card h2 { font-size: 14px; margin-bottom: 13px; }
+        .aside-card p { font-size: 13px; color: var(--muted); margin: 0 0 12px; }
+        .aside-card p:last-child { margin-bottom: 0; }
+        .aside-card.warm { background: var(--warm); border-color: var(--warm-border); }
+        .aside-card.warm h2 { color: var(--warm-heading); }
+        .checks { list-style: none; padding: 0; margin: 0; }
+        .checks li { display: flex; gap: 10px; font-size: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); color: var(--muted); }
+        .checks li:last-child { border: 0; padding-bottom: 0; }
+        .checks span { color: var(--accent); font-size: 10px; padding-top: 3px; }
+        .resource { display: block; padding: 11px 0; border-bottom: 1px solid var(--line); text-decoration: none; font-size: 12px; }
+        .resource:last-child { border: 0; padding-bottom: 0; }
+        .external::after { content: ""; display: inline-block; width: 6px; height: 6px; margin-left: 8px; border-top: 1px solid currentColor; border-right: 1px solid currentColor; vertical-align: 2px; }
+        .resource.external::after { float: right; margin-top: 7px; }
+        .tip { margin: 20px 3px 0; color: var(--muted); font-size: 12px; }
+        footer { display: flex; justify-content: space-between; gap: 16px; border-top: 1px solid var(--line); padding-top: 22px !important; padding-bottom: 26px !important; color: var(--muted); font-size: 11px; }
+        .inventory { margin-bottom: 32px; }
+        .inventory-body { padding: 20px 26px; }
+        .search-row { display: flex; gap: 12px; align-items: end; margin-bottom: 18px; flex-wrap: wrap; }
+        .search-row > div { flex: 1; min-width: 180px; }
+        .search-row .copy { min-height: 40px; }
+        .table-scroll { overflow-x: auto; margin-top: 16px; }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; text-align: left; }
+        th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+        td, th { padding: 12px 10px; border-bottom: 1px solid var(--line); }
+        td:first-child { font-weight: 600; overflow-wrap: anywhere; min-width: 140px; }
+        .inventory-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; margin-top: 18px; font-size: 12px; }
+        .pagination { margin-left: auto; display: flex; gap: 8px; }
+        .status { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 32px); padding: 10px 18px; border-radius: 8px; background: #25392c; color: white; font-size: 13px; box-shadow: 0 5px 20px #0002; }
+        .status:empty { display: none; }
+        @media (max-width: 850px) { .layout { grid-template-columns: minmax(0, 1fr); } aside { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; } .aside-card { margin: 0; } .aside-card:last-child { grid-column: 1 / -1; } }
+        @media (max-width: 560px) { .wrap { padding-left: 20px; padding-right: 20px; } .topbar .wrap { min-height: 70px; flex-wrap: wrap; gap: 12px; padding-top: 12px; padding-bottom: 12px; } .brand small { display: none; } nav { gap: 12px; font-size: 12px; flex-wrap: wrap; } main.wrap { padding-top: 32px; } .hero { display: block; } .badge { display: inline-block; margin-top: 18px; } .endpoint { padding: 18px; align-items: start; flex-direction: column; gap: 12px; } .fields { grid-template-columns: 1fr; } .panel-heading, .form, .step { padding-left: 18px; padding-right: 18px; } .copy, .codebar .copy { min-height: 44px; } aside { display: block; } .aside-card { margin-bottom: 18px; } footer { flex-direction: column; } }
+        @media (max-width: 560px) {
+            .inventory-body { padding: 18px; }
+            .table-scroll { overflow: visible; }
+            table, tbody { display: block; }
+            thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+            tr { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+            td { display: block; border: 0; padding: 0; font-size: 12px; }
+            td:first-child { min-width: 0; }
+            td:nth-child(2), td:nth-child(3) { color: var(--muted); font-size: 11px; }
+            td:nth-child(2)::before, td:nth-child(3)::before { content: attr(data-label) ": "; }
+            td:last-child { grid-column: 2; grid-row: 1; justify-self: end; }
+        }
+        @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+    </style>
+</head>
+<body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="topbar">
+        <div class="wrap">
+            <a class="brand" href="/" aria-label="Rudolfs home"><span class="mark" aria-hidden="true">r</span>{{ title }}<small>Git LFS server</small></a>
+            <nav aria-label="Main navigation"><a href="#connect">Connect</a><a class="external" href="https://github.com/jasonwhite/rudolfs">GitHub</a><select class="theme-select" id="theme-select" aria-label="Color theme" title="Color theme" hidden><option value="auto">Auto</option><option value="light">Light</option><option value="dark">Dark</option></select></nav>
         </div>
-    </body>
+    </header>
+    <main class="wrap" id="main">{% block content %}{% endblock %}</main>
+    <footer class="wrap"><span>Rudolfs · A home for your large files.</span><span>Built for Git. Powered by open source.</span></footer>
+    <div class="status" id="copy-status" role="status" aria-live="polite"></div>
+    <script>
+        (() => {
+            const selector = document.getElementById('theme-select');
+            selector.value = document.documentElement.dataset.theme || 'auto';
+            selector.hidden = false;
+            function apply(theme) {
+                if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+                else delete document.documentElement.dataset.theme;
+                selector.value = theme === 'light' || theme === 'dark' ? theme : 'auto';
+            }
+            selector.addEventListener('change', () => {
+                apply(selector.value);
+                try { localStorage.setItem('rudolfs-theme', selector.value); } catch (_) { /* Keep the choice for this page. */ }
+            });
+            window.addEventListener('storage', event => {
+                if (event.key === 'rudolfs-theme' || event.key === null) apply(event.newValue);
+            });
+        })();
+    </script>
+    {% block scripts %}{% endblock %}
+</body>
 </html>

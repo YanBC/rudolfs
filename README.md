@@ -148,7 +148,7 @@ Temp-URL-Key metadata is not modified.
 Unlike the Go SDK's default 180-day expiry, this backend omits `X-Delete-After`
 so LFS objects do not expire automatically. Check that your container has no
 external retention policy that removes objects. As with the S3 backend, deletes
-are deliberately no-ops and object listing is not implemented.
+are deliberately no-ops and container listing is used for repository discovery.
 
 ### Production
 
@@ -220,6 +220,20 @@ variable. If it is malformed, it will fall back to `us-east-1`. If it is not
 present it will fall back on the value associated with the current profile in
 `~/.aws/config` or the file specified by the `AWS_CONFIG_FILE` environment
 variable. If that is malformed or absent it will fall back to `us-east-1`.
+
+## Repository browser and HTTP API
+
+The home page lists repositories with persisted LFS objects, with search,
+pagination, object counts, byte totals, and a connection shortcut. The same
+capabilities are available at `GET /api/v1/repositories`. The header also offers
+Light, Dark, and Auto color themes. Auto follows the device preference; theme
+choices are saved in the browser when local storage is available. See the
+[HTTP API guide](docs/http-api.md) for examples, backend permissions, limits,
+and error codes, and [OpenAPI](docs/openapi.json) for the schema.
+
+Project policy requires documented HTTP APIs alongside server-backed web
+features; see [AGENTS.md](AGENTS.md). Protect discovery routes with the same
+network or reverse-proxy access controls as other server routes.
 
 ## Client Configuration
 

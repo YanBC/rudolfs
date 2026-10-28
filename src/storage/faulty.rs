@@ -110,6 +110,10 @@ where
         self.storage.list()
     }
 
+    fn inventory(&self) -> StorageStream<(StorageKey, u64), Self::Error> {
+        self.storage.inventory()
+    }
+
     async fn total_size(&self) -> Option<u64> {
         self.storage.total_size().await
     }

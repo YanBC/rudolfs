@@ -8,6 +8,7 @@ use reqwest::{Client, Method, Response, StatusCode, Url, header};
 
 use super::{LFSObject, Storage, StorageKey, StorageStream};
 
+#[derive(Clone)]
 pub struct Backend {
     client: Client,
     auth_url: Url,
@@ -215,6 +216,34 @@ impl Storage for Backend {
 
     fn list(&self) -> StorageStream<(StorageKey, u64), Error> {
         Box::pin(stream::empty())
+    }
+
+    fn inventory(&self) -> StorageStream<(StorageKey, u64), Error> {
+        let backend = self.clone();
+        Box::pin(async_stream::try_stream! {
+            #[derive(serde::Deserialize)]
+            struct Entry { name: String, bytes: u64 }
+            let prefix = if backend.prefix.is_empty() { String::new() } else { format!("{}/", backend.prefix) };
+            let mut marker = String::new();
+            loop {
+                let mut url = backend.container_url.clone();
+                url.query_pairs_mut().append_pair("format", "json").append_pair("prefix", &prefix)
+                    .append_pair("limit", "1000").append_pair("marker", &marker);
+                let response = backend.request(Method::GET, url).await?.send().await?;
+                if !response.status().is_success() { Err(anyhow::anyhow!("OSS listing failed with HTTP {}", response.status()))?; }
+                if response.status() == StatusCode::NO_CONTENT { break; }
+                let entries: Vec<Entry> = serde_json::from_slice(&response.bytes().await?)?;
+                if entries.is_empty() { break; }
+                let next = entries.last().unwrap().name.clone();
+                if next <= marker { Err(anyhow::anyhow!("OSS listing did not advance"))?; }
+                for entry in entries {
+                    if let Some(key) = entry.name.strip_prefix(&prefix).and_then(StorageKey::from_object_path) {
+                        yield (key, entry.bytes);
+                    }
+                }
+                marker = next;
+            }
+        })
     }
 
     fn public_url(&self, _key: &StorageKey) -> Option<String> {

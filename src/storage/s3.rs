@@ -453,6 +453,34 @@ impl Storage for Backend {
         Box::pin(stream::empty())
     }
 
+    fn inventory(&self) -> StorageStream<(StorageKey, u64), Self::Error> {
+        let client = self.client.clone();
+        let bucket = self.bucket.clone();
+        let prefix = if self.prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", self.prefix)
+        };
+        Box::pin(async_stream::try_stream! {
+            let mut token = None;
+            loop {
+                let page = client.list_objects_v2().bucket(&bucket).prefix(&prefix)
+                    .set_continuation_token(token.clone()).max_keys(1000).send().await?;
+                for object in page.contents() {
+                    if let (Some(path), Some(size)) = (object.key(), object.size()) {
+                        if let Some(key) = path.strip_prefix(&prefix).and_then(StorageKey::from_object_path) {
+                            if let Ok(size) = u64::try_from(size) { yield (key, size); }
+                        }
+                    }
+                }
+                if !page.is_truncated().unwrap_or(false) { break; }
+                let next = page.next_continuation_token().context("S3 listing omitted continuation token")?.to_owned();
+                if token.as_ref() == Some(&next) { Err(anyhow::anyhow!("S3 listing repeated continuation token"))?; }
+                token = Some(next);
+            }
+        })
+    }
+
     fn public_url(&self, key: &StorageKey) -> Option<String> {
         self.cdn
             .as_ref()
@@ -493,6 +521,66 @@ mod tests {
     };
     use std::convert::Infallible;
     use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn inventory_follows_s3_pages_and_filters_foreign_keys() {
+        use futures::TryStreamExt;
+        let service = make_service_fn(|_| async {
+            Ok::<_, Infallible>(service_fn(
+                |req: hyper::Request<Body>| async move {
+                    let url = reqwest::Url::parse(&format!(
+                        "http://localhost{}",
+                        req.uri()
+                    ))
+                    .unwrap();
+                    let params: std::collections::HashMap<_, _> =
+                        url.query_pairs().collect();
+                    assert_eq!(params["prefix"], "lfs/");
+                    assert_eq!(params["list-type"], "2");
+                    let second = params.contains_key("continuation-token");
+                    if second {
+                        assert_eq!(params["continuation-token"], "next");
+                    }
+                    let oid = "0".repeat(64);
+                    let body = if second {
+                        format!(
+                            "<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>lfs/org/two/00/00/{oid}</Key><Size>7</Size></Contents></ListBucketResult>"
+                        )
+                    } else {
+                        format!(
+                            "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>next</NextContinuationToken><Contents><Key>lfs/org/one/00/00/{oid}</Key><Size>4</Size></Contents><Contents><Key>lfs/not-an-object</Key><Size>50</Size></Contents></ListBucketResult>"
+                        )
+                    };
+                    Ok::<_, Infallible>(Response::new(Body::from(body)))
+                },
+            ))
+        });
+        let server =
+            hyper::Server::bind(&"127.0.0.1:0".parse().unwrap()).serve(service);
+        let endpoint = format!("http://{}", server.local_addr());
+        let task = tokio::spawn(server);
+        let config = aws_sdk_s3::config::Builder::new()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .endpoint_url(endpoint)
+            .force_path_style(true)
+            .build();
+        let storage = Backend {
+            client: Client::from_conf(config),
+            bucket: "test".into(),
+            prefix: "lfs".into(),
+            cdn: None,
+        };
+        let entries: Vec<_> = storage.inventory().try_collect().await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0.namespace().project(), "one");
+        assert_eq!(entries[1].0.namespace().project(), "two");
+        assert_eq!(entries[1].1, 7);
+        task.abort();
+    }
 
     #[tokio::test]
     async fn failed_stream_aborts_multipart_upload() {

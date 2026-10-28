@@ -370,8 +370,14 @@ where
         Box::pin(self.cache.list().map_err(Error::from_cache))
     }
 
-    /// Returns the total size of the LRU cache (not the total size of the
-    /// permanent storage).
+    fn inventory(&self) -> StorageStream<(StorageKey, u64), Self::Error> {
+        self.storage
+            .inventory()
+            .map_err(Error::from_storage)
+            .boxed()
+    }
+
+    /// Returns the total size of the LRU cache (not permanent storage).
     async fn total_size(&self) -> Option<u64> {
         Some(self.lru.lock().await.size())
     }

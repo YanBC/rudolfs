@@ -70,8 +70,34 @@ async fn handle(
         assert!(!req.headers().contains_key("X-Auth-Key"));
         assert!(!req.headers().contains_key("X-Delete-After"));
         if path == "/v1/AUTH_TEST/bucket" {
-            assert_eq!(req.method(), Method::HEAD);
-            Body::empty()
+            if req.method() == Method::HEAD {
+                Body::empty()
+            } else {
+                assert_eq!(req.method(), Method::GET);
+                let url = reqwest::Url::parse(&format!(
+                    "http://localhost{}",
+                    req.uri()
+                ))
+                .unwrap();
+                let params: std::collections::HashMap<_, _> =
+                    url.query_pairs().collect();
+                assert_eq!(params["format"], "json");
+                assert_eq!(params["prefix"], "lfs/");
+                let objects = objects.lock().unwrap();
+                let mut entries: Vec<_> = objects
+                    .iter()
+                    .map(|(path, data)| {
+                        (
+                            path.strip_prefix("/v1/AUTH_TEST/bucket/").unwrap(),
+                            data.len(),
+                        )
+                    })
+                    .filter(|(name, _)| *name > params["marker"].as_ref())
+                    .collect();
+                entries.sort();
+                let entries: Vec<_> = entries.into_iter().take(1).map(|(name, bytes)| serde_json::json!({"name":name,"bytes":bytes})).collect();
+                Body::from(serde_json::to_vec(&entries).unwrap())
+            }
         } else {
             assert!(path.starts_with("/v1/AUTH_TEST/bucket/lfs/org/repo/"));
             if req.method() == Method::PUT {

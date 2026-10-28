@@ -122,6 +122,23 @@ impl StorageKey {
         (self.namespace, self.oid)
     }
 
+    /// Parse a canonical object path relative to a backend's configured prefix.
+    pub fn from_object_path(path: &str) -> Option<Self> {
+        let parts: Vec<_> = path.split('/').collect();
+        if parts.len() != 5 {
+            return None;
+        }
+        let namespace = Namespace::new(parts[0].into(), parts[1].into());
+        let oid: Oid = parts[4].parse().ok()?;
+        if !namespace.is_valid()
+            || oid.path().to_string()
+                != format!("{}/{}/{}", parts[2], parts[3], parts[4])
+        {
+            return None;
+        }
+        Some(Self::new(namespace, oid))
+    }
+
     pub fn oid(&self) -> &Oid {
         &self.oid
     }
@@ -220,6 +237,11 @@ pub trait Storage {
     /// Returns a stream of all the object IDs in the storage medium.
     fn list(&self) -> StorageStream<(StorageKey, u64), Self::Error>;
 
+    /// Enumerates permanent objects, never just the contents of a cache.
+    fn inventory(&self) -> StorageStream<(StorageKey, u64), Self::Error> {
+        self.list()
+    }
+
     /// Gets the total size of the storage, if known.
     async fn total_size(&self) -> Option<u64> {
         None
@@ -281,6 +303,10 @@ where
     #[inline]
     fn list(&self) -> StorageStream<(StorageKey, u64), Self::Error> {
         self.as_ref().list()
+    }
+
+    fn inventory(&self) -> StorageStream<(StorageKey, u64), Self::Error> {
+        self.as_ref().inventory()
     }
 
     #[inline]

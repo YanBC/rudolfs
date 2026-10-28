@@ -178,23 +178,19 @@ impl Storage for Backend {
         let path = self.root.join("objects");
 
         let objects = try_stream! {
-            let mut orgs = fs::read_dir(path).await?;
-
-            while let Some(entry) = orgs.next_entry().await? {
-                let mut projects = fs::read_dir(entry.path()).await?;
-
-                while let Some(entry) = projects.next_entry().await? {
-                    let mut tier1 = fs::read_dir(entry.path()).await?;
-
-                    while let Some(entry) = tier1.next_entry().await? {
-                        let mut tier2 = fs::read_dir(entry.path()).await?;
-
-                        while let Some(entry) = tier2.next_entry().await? {
-                            let mut objects = fs::read_dir(entry.path()).await?;
-                            while let Some(entry) = objects.next_entry().await? {
-                                yield entry;
-                            }
-                        }
+            let mut pending = vec![(path, 0)];
+            while let Some((path, depth)) = pending.pop() {
+                let mut dir = match fs::read_dir(path).await {
+                    Ok(dir) => dir,
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                    Err(err) => Err(err)?,
+                };
+                while let Some(entry) = dir.next_entry().await? {
+                    let kind = entry.file_type().await?;
+                    if depth < 4 && kind.is_dir() {
+                        pending.push((entry.path(), depth + 1));
+                    } else if depth == 4 && kind.is_file() {
+                        yield entry;
                     }
                 }
             }
@@ -221,7 +217,7 @@ impl Storage for Backend {
                     .and_then(OsStr::to_str)
                     .and_then(|s| Oid::from_str(s).ok())?;
 
-                if metadata.is_file() {
+                if metadata.is_file() && namespace.is_valid() {
                     Some((StorageKey::new(namespace, oid), metadata.len()))
                 } else {
                     None
@@ -320,6 +316,48 @@ impl Encoder<Bytes> for BytesCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn inventory_ignores_symlinks_and_non_directory_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let storage = Backend::new(root.path().into()).await.unwrap();
+        assert_eq!(
+            storage
+                .inventory()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+        fs::create_dir_all(root.path().join("objects"))
+            .await
+            .unwrap();
+        fs::write(root.path().join("objects/unrelated-file"), b"test")
+            .await
+            .unwrap();
+        let object_dir = outside.path().join("project/00/00");
+        fs::create_dir_all(&object_dir).await.unwrap();
+        fs::write(object_dir.join("0".repeat(64)), b"test")
+            .await
+            .unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            outside.path(),
+            root.path().join("objects/linked-org"),
+        )
+        .unwrap();
+        assert_eq!(
+            storage
+                .inventory()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+    }
 
     #[tokio::test]
     async fn rejects_paths_outside_the_namespace() {

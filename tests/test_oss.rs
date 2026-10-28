@@ -108,6 +108,21 @@ async fn exercise_server(encrypted: bool, cached: bool) {
     let response = client.get(download).send().await.unwrap();
     assert!(response.status().is_success());
     assert_eq!(response.bytes().await.unwrap().as_ref(), data);
+    let inventory: Value = serde_json::from_slice(
+        &client
+            .get(format!("{endpoint}/api/v1/repositories"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(inventory["pagination"]["total"], 1);
+    assert_eq!(inventory["repositories"][0]["organization"], "org");
+    assert_eq!(inventory["repositories"][0]["object_count"], 1);
+    assert_eq!(inventory["repositories"][0]["size_bytes"], data.len());
     let objects = mock.objects();
     assert_eq!(objects.len(), 1);
     let stored = objects.values().next().unwrap();

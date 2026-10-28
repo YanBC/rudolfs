@@ -115,6 +115,115 @@ where
             .body("Not found".into())?)
     }
 
+    /// Versioned repository discovery; the web UI consumes this same endpoint.
+    async fn repositories(
+        storage: S,
+        req: Request<Body>,
+    ) -> Result<Response<Body>, Error> {
+        if req.method() != Method::GET {
+            let mut response = api_error(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "Use GET for repository discovery",
+            )?;
+            response
+                .headers_mut()
+                .insert(header::ALLOW, "GET".parse().unwrap());
+            return Ok(response);
+        }
+        let params =
+            match RepositoryQuery::parse(req.uri().query().unwrap_or("")) {
+                Ok(params) => params,
+                Err(message) => {
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_query",
+                        message,
+                    );
+                }
+            };
+        let scan = async {
+            let mut entries = storage.inventory();
+            let mut repositories: BTreeMap<Namespace, (u64, u64)> =
+                BTreeMap::new();
+            let mut scanned = 0;
+            while let Some((key, bytes)) = entries
+                .try_next()
+                .await
+                .map_err(|_| "storage_unavailable")?
+            {
+                scanned += 1;
+                if scanned > 100_000 {
+                    return Err("inventory_limit_exceeded");
+                }
+                let namespace = key.namespace();
+                if !namespace.is_valid() {
+                    continue;
+                }
+                if !namespace
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains(&params.q)
+                {
+                    continue;
+                }
+                let entry = repositories.entry(namespace.clone()).or_default();
+                entry.0 += 1;
+                entry.1 = entry
+                    .1
+                    .checked_add(bytes)
+                    .ok_or("inventory_limit_exceeded")?;
+            }
+            Ok(repositories)
+        };
+        let repositories = match tokio::time::timeout(
+            Duration::from_secs(30),
+            scan,
+        )
+        .await
+        {
+            Ok(Ok(repositories)) => repositories,
+            Ok(Err(code)) => {
+                return api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    code,
+                    "Repository inventory could not be completed; try again later",
+                );
+            }
+            Err(_) => {
+                return api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "inventory_timeout",
+                    "Repository inventory exceeded 30 seconds; try again later",
+                );
+            }
+        };
+        let total = repositories.len();
+        let items: Vec<_> = repositories.into_iter().skip(params.offset).take(params.limit).map(|(namespace, (objects, bytes))| {
+            serde_json::json!({"organization": namespace.org(), "repository": namespace.project(),
+                "object_count": objects, "size_bytes": bytes,
+                "lfs_url": format!("{}/{}", req.base_uri().path_and_query("/api").build().unwrap(), namespace)})
+        }).collect();
+        let next_offset = params.offset.saturating_add(items.len());
+        let next = if next_offset < total {
+            let mut url =
+                reqwest::Url::parse("http://localhost/api/v1/repositories")
+                    .unwrap();
+            url.query_pairs_mut()
+                .append_pair("limit", &params.limit.to_string())
+                .append_pair("offset", &next_offset.to_string())
+                .append_pair("q", &params.q);
+            Some(format!("{}?{}", url.path(), url.query().unwrap()))
+        } else {
+            None
+        };
+        json_response(
+            StatusCode::OK,
+            &serde_json::json!({"repositories": items,
+            "pagination": {"limit": params.limit, "offset": params.offset, "total": total, "next": next}}),
+        )
+    }
+
     /// Handles `/api` routes.
     async fn api(
         storage: S,
@@ -324,6 +433,77 @@ where
     }
 }
 
+fn json_response(
+    status: StatusCode,
+    value: &serde_json::Value,
+) -> Result<Response<Body>, Error> {
+    Ok(Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(into_json(value)?)?)
+}
+
+fn api_error(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) -> Result<Response<Body>, Error> {
+    json_response(
+        status,
+        &serde_json::json!({"error": {"code": code, "message": message}}),
+    )
+}
+
+struct RepositoryQuery {
+    limit: usize,
+    offset: usize,
+    q: String,
+}
+impl RepositoryQuery {
+    fn parse(query: &str) -> Result<Self, &'static str> {
+        if query.len() > 2048 {
+            return Err("Query string is too long");
+        }
+        let url = reqwest::Url::parse(&format!("http://localhost/?{query}"))
+            .map_err(|_| "Invalid query")?;
+        let mut result = Self {
+            limit: 25,
+            offset: 0,
+            q: String::new(),
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        for (name, value) in url.query_pairs() {
+            if !seen.insert(name.to_string()) {
+                return Err("Duplicate query parameter");
+            }
+            match name.as_ref() {
+                "limit" => {
+                    result.limit = value.parse().map_err(
+                        |_| "limit must be an integer from 1 to 100",
+                    )?;
+                    if !(1..=100).contains(&result.limit) {
+                        return Err("limit must be an integer from 1 to 100");
+                    }
+                }
+                "offset" => {
+                    result.offset = value
+                        .parse()
+                        .map_err(|_| "offset must be a nonnegative integer")?
+                }
+                "q" => {
+                    if value.len() > 200 {
+                        return Err("q must be at most 200 bytes");
+                    }
+                    result.q = value.to_ascii_lowercase();
+                }
+                _ => return Err("Unknown query parameter"),
+            }
+        }
+        Ok(result)
+    }
+}
+
 async fn basic_response<E, S>(
     uri: Uri,
     headers: &HeaderMap,
@@ -524,6 +704,33 @@ where
     fn call(&mut self, req: Request<Body>) -> Self::Future {
         if req.uri().path() == "/" {
             Box::pin(future::ready(Self::index(req)))
+        } else if req.uri().path() == "/api/v1/openapi.json" {
+            let response = if req.method() != Method::GET {
+                api_error(
+                    StatusCode::METHOD_NOT_ALLOWED,
+                    "method_not_allowed",
+                    "Use GET to retrieve the API specification",
+                )
+                .map(|mut response| {
+                    response
+                        .headers_mut()
+                        .insert(header::ALLOW, "GET".parse().unwrap());
+                    response
+                })
+            } else if req.uri().query().is_some() {
+                api_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_query",
+                    "OpenAPI does not accept query parameters",
+                )
+            } else {
+                serde_json::from_str(include_str!("../docs/openapi.json"))
+                    .map_err(anyhow::Error::new)
+                    .and_then(|spec| json_response(StatusCode::OK, &spec))
+            };
+            Box::pin(future::ready(response))
+        } else if req.uri().path() == "/api/v1/repositories" {
+            Box::pin(Self::repositories(self.storage.clone(), req))
         } else if req.uri().path().starts_with("/api/") {
             Box::pin(Self::api(self.storage.clone(), req))
         } else {
@@ -558,6 +765,11 @@ mod security_tests {
         }
         async fn delete(&self, key: &StorageKey) -> io::Result<()> {
             self.0.delete(key).await
+        }
+        fn inventory(&self) -> StorageStream<(StorageKey, u64), io::Error> {
+            Box::pin(futures::stream::once(async {
+                Err(io::Error::other("private path and credential detail"))
+            }))
         }
         fn list(&self) -> StorageStream<(StorageKey, u64), io::Error> {
             self.0.list()
@@ -655,5 +867,61 @@ mod security_tests {
             App::api(storage, request).await.unwrap().status(),
             StatusCode::BAD_REQUEST
         );
+    }
+    #[tokio::test]
+    async fn inventory_errors_are_json_and_do_not_leak_backend_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = ExternalUrls(Disk::new(dir.path().into()).await.unwrap());
+        let req = Request::get("/api/v1/repositories")
+            .body(Body::empty())
+            .unwrap();
+        let response = App::repositories(storage, req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "storage_unavailable");
+        assert!(!String::from_utf8_lossy(&body).contains("private"));
+    }
+
+    #[tokio::test]
+    async fn inventory_finds_permanent_objects_absent_from_cache() {
+        use crate::storage::{Cached, Verify};
+        let cache = tempfile::tempdir().unwrap();
+        let permanent = tempfile::tempdir().unwrap();
+        let storage = Verify::new(
+            Cached::new(
+                1,
+                Disk::new(cache.path().into()).await.unwrap(),
+                Disk::new(permanent.path().into()).await.unwrap(),
+            )
+            .await
+            .unwrap(),
+        );
+        let key = StorageKey::new(
+            Namespace::new("org".into(), "repo".into()),
+            Default::default(),
+        );
+        // Seed permanent storage directly to simulate an object absent from cache.
+        let disk = Disk::new(permanent.path().into()).await.unwrap();
+        disk.put(
+            key,
+            LFSObject::new(
+                4,
+                Box::pin(futures::stream::once(async {
+                    Ok(bytes::Bytes::from_static(b"test"))
+                })),
+            ),
+        )
+        .await
+        .unwrap();
+        let req = Request::get("/api/v1/repositories")
+            .body(Body::empty())
+            .unwrap();
+        let response = App::repositories(storage, req).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(
+            &hyper::body::to_bytes(response.into_body()).await.unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["repositories"][0]["object_count"], 1);
     }
 }
