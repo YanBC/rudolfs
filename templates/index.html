@@ -25,6 +25,15 @@
         <div class="inventory-footer"><a href="/api/v1/repositories">HTTP API</a><a href="/api/v1/openapi.json">OpenAPI specification</a><div class="pagination" id="repository-pagination" hidden><button type="button" class="copy" id="previous-page">Previous</button><button type="button" class="copy" id="next-page">Next</button></div></div>
     </div>
 </section>
+<section class="panel inventory" aria-labelledby="audit-title">
+    <div class="panel-heading"><h2 id="audit-title">Storage health</h2><p class="sub">Compare the local SQLite inventory with stored files. Checks for missing files and changed sizes; file contents are not hashed.</p></div>
+    <div class="inventory-body">
+        <button type="button" class="copy" id="run-audit" hidden>Run audit</button>
+        <p id="audit-status" class="sub" role="status" aria-live="polite">Run an audit to check local storage, or <a href="/api/v1/storage/audit">request the audit as JSON</a>.</p>
+        <div class="table-scroll" id="audit-table" hidden><table><thead><tr><th scope="col">Repository</th><th scope="col">Object SHA-256</th><th scope="col">Problem</th></tr></thead><tbody id="audit-rows"></tbody></table></div>
+        <div class="inventory-footer"><a href="/api/v1/storage/audit">Audit HTTP API</a><div class="pagination" id="audit-pagination" hidden><button type="button" class="copy" id="audit-previous">Previous</button><button type="button" class="copy" id="audit-next">Next</button></div></div>
+    </div>
+</section>
 <div class="layout">
     <div>
         <section class="panel" id="connect" aria-labelledby="connect-title">
@@ -170,6 +179,54 @@ git push</pre></div>
     previous.addEventListener('click', () => { offset = Math.max(0, offset - 10); loadRepositories(); });
     next.addEventListener('click', () => { offset += 10; loadRepositories(); });
     loadRepositories();
+
+    const auditButton = document.getElementById('run-audit');
+    const auditStatus = document.getElementById('audit-status');
+    const auditTable = document.getElementById('audit-table');
+    const auditRows = document.getElementById('audit-rows');
+    const auditPagination = document.getElementById('audit-pagination');
+    const auditPrevious = document.getElementById('audit-previous');
+    const auditNext = document.getElementById('audit-next');
+    let auditOffset = 0;
+    async function loadAudit() {
+        auditButton.disabled = true;
+        auditPrevious.disabled = true;
+        auditNext.disabled = true;
+        auditTable.hidden = true;
+        auditPagination.hidden = true;
+        auditStatus.textContent = 'Checking local storage…';
+        try {
+            const response = await fetch('/api/v1/storage/audit?limit=10&offset=' + auditOffset, {headers: {Accept: 'application/json'}});
+            const data = await response.json();
+            if (!response.ok) throw new Error(data.error?.message || 'The server could not audit storage.');
+            auditRows.replaceChildren();
+            for (const issue of data.issues) {
+                const row = document.createElement('tr');
+                for (const [label, value] of [['Repository', issue.organization + '/' + issue.repository], ['Object SHA-256', issue.oid], ['Problem', issue.status === 'missing' ? 'Missing file' : `Size changed: expected ${issue.expected_size_bytes} B, found ${issue.actual_size_bytes} B`]]) {
+                    const cell = document.createElement('td');
+                    cell.dataset.label = label;
+                    cell.textContent = value;
+                    row.append(cell);
+                }
+                auditRows.append(row);
+            }
+            auditTable.hidden = data.issues.length === 0;
+            auditStatus.textContent = data.pagination.total === 0
+                ? (data.tracked_objects === 0 ? 'No objects tracked yet.' : `No missing files or size mismatches among ${data.tracked_objects} tracked objects.`)
+                : `Found ${data.pagination.total} storage issues among ${data.tracked_objects} tracked objects. Showing ${data.issues.length} on this page. Restore missing files from a backup or a client copy.`;
+            auditPagination.hidden = auditOffset === 0 && !data.pagination.next;
+            auditPrevious.disabled = auditOffset === 0;
+            auditNext.disabled = !data.pagination.next;
+        } catch (error) {
+            auditStatus.textContent = 'Unable to complete audit. ' + error.message + ' Use Run audit to try again.';
+        } finally {
+            auditButton.disabled = false;
+        }
+    }
+    auditButton.hidden = false;
+    auditButton.addEventListener('click', () => { auditOffset = 0; loadAudit(); });
+    auditPrevious.addEventListener('click', () => { auditOffset = Math.max(0, auditOffset - 10); loadAudit(); });
+    auditNext.addEventListener('click', () => { auditOffset += 10; loadAudit(); });
 
     let statusTimer;
     const status = document.getElementById('copy-status');

@@ -38,6 +38,7 @@ use crate::util::NamedTempFile;
 
 pub struct Backend {
     root: PathBuf,
+    inventory: Option<super::inventory::Inventory>,
 }
 
 impl Backend {
@@ -45,7 +46,30 @@ impl Backend {
         fs::create_dir_all(&root).await?;
 
         // TODO: Clean out files in the "incomplete" folder?
-        Ok(Backend { root })
+        Ok(Backend {
+            root,
+            inventory: None,
+        })
+    }
+
+    /// Permanent local storage has a durable inventory; cache disks do not.
+    pub async fn with_inventory(root: PathBuf) -> io::Result<Self> {
+        let mut storage = Self::new(root).await?;
+        let inventory = super::inventory::Inventory::open(
+            storage.root.join("inventory.sqlite3"),
+        )
+        .await?;
+        let mut entries = storage.list();
+        let mut batch = Vec::new();
+        while let Some(entry) = entries.try_next().await? {
+            batch.push(entry);
+            if batch.len() == 256 {
+                inventory.record(std::mem::take(&mut batch), false).await?;
+            }
+        }
+        inventory.record(batch, false).await?;
+        storage.inventory = Some(inventory);
+        Ok(storage)
     }
 
     // Use sub directories in order to better utilize the file system's internal
@@ -127,6 +151,9 @@ impl Storage for Backend {
         } else {
             fs::create_dir_all(dir).await?;
             file.persist(path).await?;
+            if let Some(inventory) = &self.inventory {
+                inventory.record(vec![(key, len)], true).await?;
+            }
             Ok(())
         }
     }
@@ -248,6 +275,17 @@ impl Storage for Backend {
                         }
                     }
                 }
+            }
+        }))
+    }
+
+    fn expected_inventory(
+        &self,
+    ) -> Option<StorageStream<(StorageKey, u64), Self::Error>> {
+        let inventory = self.inventory.clone()?;
+        Some(Box::pin(try_stream! {
+            for entry in inventory.entries().await? {
+                yield entry;
             }
         }))
     }

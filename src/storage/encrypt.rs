@@ -116,6 +116,12 @@ where
         self.storage.inventory()
     }
 
+    fn expected_inventory(
+        &self,
+    ) -> Option<StorageStream<(StorageKey, u64), Self::Error>> {
+        self.storage.expected_inventory()
+    }
+
     async fn total_size(&self) -> Option<u64> {
         self.storage.total_size().await
     }

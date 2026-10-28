@@ -22,6 +22,7 @@ mod disk;
 mod encrypt;
 #[cfg(feature = "faulty")]
 mod faulty;
+mod inventory;
 mod oss;
 mod retrying;
 mod s3;
@@ -242,6 +243,13 @@ pub trait Storage {
         self.list()
     }
 
+    /// Durable expectations, when supported by the permanent backend.
+    fn expected_inventory(
+        &self,
+    ) -> Option<StorageStream<(StorageKey, u64), Self::Error>> {
+        None
+    }
+
     /// Gets the total size of the storage, if known.
     async fn total_size(&self) -> Option<u64> {
         None
@@ -307,6 +315,12 @@ where
 
     fn inventory(&self) -> StorageStream<(StorageKey, u64), Self::Error> {
         self.as_ref().inventory()
+    }
+
+    fn expected_inventory(
+        &self,
+    ) -> Option<StorageStream<(StorageKey, u64), Self::Error>> {
+        self.as_ref().expected_inventory()
     }
 
     #[inline]

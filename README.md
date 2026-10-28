@@ -235,6 +235,19 @@ Project policy requires documented HTTP APIs alongside server-backed web
 features; see [AGENTS.md](AGENTS.md). Protect discovery routes with the same
 network or reverse-proxy access controls as other server routes.
 
+## Local SQLite inventory
+
+The local disk backend automatically maintains `inventory.sqlite3` in its data
+root. No separate database service is required. Existing objects are imported at
+startup; successful uploads are recorded, and missing-object records survive
+restarts. Cache disks and S3/OSS permanent storage do not use this database.
+
+Use **Storage health → Run audit** on the home page or
+`GET /api/v1/storage/audit` to find tracked files that are missing or have changed
+size. Audits do not hash contents or recover data. Restore missing files from
+backups or re-upload them from a client that retains the object. See the
+[API guide](docs/http-api.md#local-storage-audit) for limits and backup guidance.
+
 ## Client Configuration
 
 Add a file named `.lfsconfig` to the root of your Git repository and commit it

@@ -115,6 +115,134 @@ where
             .body("Not found".into())?)
     }
 
+    /// Compare durable expectations with permanent storage, without modifying either.
+    async fn audit(
+        storage: S,
+        req: Request<Body>,
+    ) -> Result<Response<Body>, Error> {
+        if req.method() != Method::GET {
+            let mut response = api_error(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "Use GET for storage audits",
+            )?;
+            response
+                .headers_mut()
+                .insert(header::ALLOW, "GET".parse().unwrap());
+            return Ok(response);
+        }
+        let params =
+            match RepositoryQuery::parse(req.uri().query().unwrap_or("")) {
+                Ok(params) => params,
+                Err(message) => {
+                    return api_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_query",
+                        message,
+                    );
+                }
+            };
+        let Some(mut expected) = storage.expected_inventory() else {
+            return api_error(
+                StatusCode::CONFLICT,
+                "audit_unavailable",
+                "Durable inventory audits are supported only by local permanent storage",
+            );
+        };
+        let scan = async {
+            let mut tracked = BTreeMap::new();
+            while let Some((key, size)) = expected
+                .try_next()
+                .await
+                .map_err(|_| "storage_unavailable")?
+            {
+                tracked.insert(key, size);
+                if tracked.len() > 100_000 {
+                    return Err("inventory_limit_exceeded");
+                }
+            }
+            let mut actual = BTreeMap::new();
+            let mut entries = storage.inventory();
+            let mut scanned = 0;
+            while let Some((key, size)) = entries
+                .try_next()
+                .await
+                .map_err(|_| "storage_unavailable")?
+            {
+                scanned += 1;
+                if scanned > 100_000 {
+                    return Err("inventory_limit_exceeded");
+                }
+                actual.insert(key, size);
+            }
+            let tracked_objects = tracked.len();
+            let mut issues = Vec::new();
+            for (key, expected_size) in tracked {
+                if !key
+                    .namespace()
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains(&params.q)
+                {
+                    continue;
+                }
+                let actual_size = actual.get(&key).copied();
+                if actual_size == Some(expected_size) {
+                    continue;
+                }
+                issues.push(serde_json::json!({
+                    "organization": key.namespace().org(), "repository": key.namespace().project(),
+                    "oid": key.oid().to_string(), "expected_size_bytes": expected_size,
+                    "actual_size_bytes": actual_size,
+                    "status": if actual_size.is_none() { "missing" } else { "size_mismatch" }
+                }));
+            }
+            Ok((tracked_objects, issues))
+        };
+        let (tracked_objects, issues) =
+            match tokio::time::timeout(Duration::from_secs(30), scan).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(code)) => {
+                    return api_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        code,
+                        "Storage audit could not be completed; try again later",
+                    );
+                }
+                Err(_) => {
+                    return api_error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "inventory_timeout",
+                        "Storage audit exceeded 30 seconds; try again later",
+                    );
+                }
+            };
+        let total = issues.len();
+        let items: Vec<_> = issues
+            .into_iter()
+            .skip(params.offset)
+            .take(params.limit)
+            .collect();
+        let next_offset = params.offset.saturating_add(items.len());
+        let next = if next_offset < total {
+            let mut url =
+                reqwest::Url::parse("http://localhost/api/v1/storage/audit")
+                    .unwrap();
+            url.query_pairs_mut()
+                .append_pair("limit", &params.limit.to_string())
+                .append_pair("offset", &next_offset.to_string())
+                .append_pair("q", &params.q);
+            Some(format!("{}?{}", url.path(), url.query().unwrap()))
+        } else {
+            None
+        };
+        json_response(
+            StatusCode::OK,
+            &serde_json::json!({"tracked_objects": tracked_objects, "issues": items,
+            "pagination": {"limit": params.limit, "offset": params.offset, "total": total, "next": next}}),
+        )
+    }
+
     /// Versioned repository discovery; the web UI consumes this same endpoint.
     async fn repositories(
         storage: S,
@@ -729,6 +857,8 @@ where
                     .and_then(|spec| json_response(StatusCode::OK, &spec))
             };
             Box::pin(future::ready(response))
+        } else if req.uri().path() == "/api/v1/storage/audit" {
+            Box::pin(Self::audit(self.storage.clone(), req))
         } else if req.uri().path() == "/api/v1/repositories" {
             Box::pin(Self::repositories(self.storage.clone(), req))
         } else if req.uri().path().starts_with("/api/") {
@@ -868,6 +998,20 @@ mod security_tests {
             StatusCode::BAD_REQUEST
         );
     }
+    #[tokio::test]
+    async fn audit_requires_durable_permanent_inventory() {
+        let dir = tempfile::tempdir().unwrap();
+        let disk = Disk::new(dir.path().into()).await.unwrap();
+        let request = Request::get("/api/v1/storage/audit")
+            .body(Body::empty())
+            .unwrap();
+        let response = App::audit(disk, request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["error"]["code"], "audit_unavailable");
+    }
+
     #[tokio::test]
     async fn inventory_errors_are_json_and_do_not_leak_backend_details() {
         let dir = tempfile::tempdir().unwrap();

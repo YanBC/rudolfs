@@ -374,7 +374,8 @@ impl LocalServerBuilder {
         addr: SocketAddr,
     ) -> Result<Box<dyn Server + Unpin + Send>, Box<dyn std::error::Error>>
     {
-        let storage = Disk::new(self.path).map_err(Error::from).await?;
+        let storage =
+            Disk::with_inventory(self.path).map_err(Error::from).await?;
 
         match self.key {
             Some(key) => {
