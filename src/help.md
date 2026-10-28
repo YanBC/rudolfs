@@ -24,3 +24,9 @@ EXAMPLES
 
     NOTE: Always use a different S3 bucket, cache directory, and encryption key
     than what you use in your production environment.
+
+    To start an SF Express OSS server through a proxy:
+
+      # Set OSS_ENDPOINT, OSS_NAMESCOPE, OSS_CONTAINER,
+      # OSS_AUTHUSER, and OSS_AUTHKEY in the environment.
+      rudolfs --cache-dir=my_local_cache oss --proxy=http://127.0.0.1:6003

@@ -13,6 +13,7 @@ A high-performance, caching Git LFS server with an AWS S3 back-end.
 
    1. AWS S3 backend with an optional local disk cache.
    2. Local disk backend.
+   3. SF Express OSS (Swift auth v1) with an optional local disk cache.
 
  - A configurable local disk cache to speed up downloads (and reduce your
    S3 bill).
@@ -109,6 +110,45 @@ Thus, to make the server accessible from the outside world, specify `--host
 network interfaces, both internal and external. See
 https://github.com/jasonwhite/rudolfs/issues/38#issuecomment-973721511 for more
 information.
+
+### SF Express OSS
+
+The `oss` backend implements the HTTP protocol used by `sf-oss-golang` directly
+in Rust. It uses the same environment variables and an existing container:
+
+```bash
+export OSS_ENDPOINT=https://your-oss-endpoint.example.com
+export OSS_NAMESCOPE=YOUR-NAMESCOPE  # without AUTH_
+export OSS_CONTAINER=your-lfs-container
+export OSS_AUTHUSER=your-auth-user
+export OSS_AUTHKEY=your-auth-key
+export OSS_PROXY=http://127.0.0.1:6003
+
+cargo run -- --port 8080 --cache-dir cache oss
+```
+
+The proxy is optional outside networks that require it. `--proxy` / `OSS_PROXY`
+applies to all OSS requests, including authentication. Standard HTTP proxy
+environment variables are also supported by the HTTP client.
+
+The subcommand accepts `--endpoint`, `--namescope`, `--container`, `--auth-user`,
+and `--auth-key` as alternatives to those environment variables. Prefer environment
+variables for credentials. `--prefix` / `RUDOLFS_OSS_PREFIX` defaults to `lfs`;
+use `--prefix ''` to omit it. Objects are stored at
+`/v1/AUTH_<namescope>/<container>/<prefix>/<org>/<project>/<oid-path>`, using
+Rudolfs's usual sharded OID path. Startup authenticates and checks the container
+with HEAD; it does not create a container.
+
+Global `--key`, `--cache-dir`, and `--max-cache-size` options work with OSS.
+Uploads and downloads stream through Rudolfs, preserving encryption and SHA256
+verification. Authentication obtains a fresh `X-Auth-Token` for every operation,
+as in the Go SDK. Temporary URLs and direct uploads are not used, and container
+Temp-URL-Key metadata is not modified.
+
+Unlike the Go SDK's default 180-day expiry, this backend omits `X-Delete-After`
+so LFS objects do not expire automatically. Check that your container has no
+external retention policy that removes objects. As with the S3 backend, deletes
+are deliberately no-ops and object listing is not implemented.
 
 ### Production
 

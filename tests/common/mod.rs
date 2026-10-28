@@ -18,6 +18,7 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 #![allow(unused)]
+pub mod oss;
 use std::fs::{self, File};
 use std::io;
 use std::net::IpAddr;

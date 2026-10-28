@@ -26,7 +26,7 @@ use structopt::StructOpt;
 use tracing_subscriber::filter::EnvFilter;
 use tracing_subscriber::filter::LevelFilter;
 
-use rudolfs::{Cache, LocalServerBuilder, S3ServerBuilder};
+use rudolfs::{Cache, LocalServerBuilder, OssServerBuilder, S3ServerBuilder};
 
 // Additional help to append to the end when `--help` is specified.
 static AFTER_HELP: &str = include_str!("help.md");
@@ -46,6 +46,10 @@ enum Backend {
     /// Starts the server with S3 as the storage backend.
     #[structopt(name = "s3")]
     S3(S3Args),
+
+    /// Starts the server with SF Express OSS as the storage backend.
+    #[structopt(name = "oss")]
+    Oss(OssArgs),
 
     /// Starts the server with the local disk as the storage backend.
     #[structopt(name = "local")]
@@ -113,6 +117,37 @@ struct S3Args {
 }
 
 #[derive(StructOpt)]
+struct OssArgs {
+    /// OSS origin URL (HTTP or HTTPS).
+    #[structopt(long, env = "OSS_ENDPOINT")]
+    endpoint: String,
+
+    /// OSS namescope, without the AUTH_ prefix.
+    #[structopt(long, env = "OSS_NAMESCOPE")]
+    namescope: String,
+
+    /// Existing OSS container (bucket).
+    #[structopt(long, env = "OSS_CONTAINER")]
+    container: String,
+
+    /// OSS X-Auth-User credential.
+    #[structopt(long, env = "OSS_AUTHUSER", hide_env_values = true)]
+    auth_user: String,
+
+    /// OSS X-Auth-Key credential.
+    #[structopt(long, env = "OSS_AUTHKEY", hide_env_values = true)]
+    auth_key: String,
+
+    /// Object path prefix. Empty omits the prefix.
+    #[structopt(long, default_value = "lfs", env = "RUDOLFS_OSS_PREFIX")]
+    prefix: String,
+
+    /// Proxy for OSS traffic, including authentication.
+    #[structopt(long, env = "OSS_PROXY")]
+    proxy: Option<String>,
+}
+
+#[derive(StructOpt)]
 struct LocalArgs {
     /// Directory where the LFS files should be stored. This directory will be
     /// created if it does not exist.
@@ -152,6 +187,7 @@ impl Args {
 
         match self.backend {
             Backend::S3(s3) => s3.run(addr, self.global).await?,
+            Backend::Oss(oss) => oss.run(addr, self.global).await?,
             Backend::Local(local) => local.run(addr, self.global).await?,
         }
 
@@ -184,6 +220,37 @@ impl S3Args {
             builder.cache(Cache::new(cache_dir, max_cache_size));
         }
 
+        builder.run(addr).await
+    }
+}
+
+impl OssArgs {
+    async fn run(
+        self,
+        addr: SocketAddr,
+        global_args: GlobalArgs,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut builder = OssServerBuilder::new(
+            self.endpoint,
+            self.namescope,
+            self.container,
+            self.auth_user,
+            self.auth_key,
+        );
+        builder.prefix(self.prefix);
+        if let Some(proxy) = self.proxy {
+            builder.proxy(proxy);
+        }
+        if let Some(key) = global_args.key {
+            builder.key(key);
+        }
+        if let Some(cache_dir) = global_args.cache_dir {
+            let max_cache_size = global_args
+                .max_cache_size
+                .into::<human_size::Byte>()
+                .value() as u64;
+            builder.cache(Cache::new(cache_dir, max_cache_size));
+        }
         builder.run(addr).await
     }
 }

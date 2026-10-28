@@ -44,7 +44,9 @@ use hyper::{
 use crate::app::App;
 use crate::error::Error;
 use crate::logger::Logger;
-use crate::storage::{Cached, Disk, Encrypted, Retrying, S3, Storage, Verify};
+use crate::storage::{
+    Cached, Disk, Encrypted, Oss, Retrying, S3, Storage, Verify,
+};
 
 #[cfg(feature = "faulty")]
 use crate::storage::Faulty;
@@ -215,6 +217,117 @@ impl S3ServerBuilder {
 
         tracing::info!("Listening on {}", server.addr());
 
+        server.await?;
+        Ok(())
+    }
+}
+
+/// Builds a server backed by SF Express's Swift-style OSS service.
+/// Credentials are intentionally excluded from Debug output.
+pub struct OssServerBuilder {
+    endpoint: String,
+    namescope: String,
+    container: String,
+    auth_user: String,
+    auth_key: String,
+    prefix: String,
+    proxy: Option<String>,
+    key: Option<[u8; 32]>,
+    cache: Option<Cache>,
+}
+
+impl OssServerBuilder {
+    pub fn new(
+        endpoint: String,
+        namescope: String,
+        container: String,
+        auth_user: String,
+        auth_key: String,
+    ) -> Self {
+        Self {
+            endpoint,
+            namescope,
+            container,
+            auth_user,
+            auth_key,
+            prefix: "lfs".into(),
+            proxy: None,
+            key: None,
+            cache: None,
+        }
+    }
+
+    /// Sets the object prefix (default: lfs). Empty omits the prefix.
+    pub fn prefix(&mut self, prefix: String) -> &mut Self {
+        self.prefix = prefix;
+        self
+    }
+
+    /// Sets an HTTP proxy used for all OSS requests, including authentication.
+    pub fn proxy(&mut self, proxy: String) -> &mut Self {
+        self.proxy = Some(proxy);
+        self
+    }
+
+    pub fn key(&mut self, key: [u8; 32]) -> &mut Self {
+        self.key = Some(key);
+        self
+    }
+
+    pub fn cache(&mut self, cache: Cache) -> &mut Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    pub async fn spawn(
+        self,
+        addr: SocketAddr,
+    ) -> Result<Box<dyn Server + Unpin + Send>, Box<dyn std::error::Error>>
+    {
+        let oss = Oss::new(
+            self.endpoint,
+            self.namescope,
+            self.container,
+            self.auth_user,
+            self.auth_key,
+            self.prefix,
+            self.proxy,
+        )
+        .await?;
+        let oss = Retrying::new(oss);
+        #[cfg(feature = "faulty")]
+        let oss = Faulty::new(oss);
+
+        match self.cache {
+            Some(cache) => {
+                let disk = Disk::new(cache.dir).await?;
+                let cache = Cached::new(cache.max_size, disk, oss).await?;
+                match self.key {
+                    Some(key) => Ok(Box::new(spawn_server(
+                        Verify::new(Encrypted::new(key, cache)),
+                        &addr,
+                    ))),
+                    None => {
+                        Ok(Box::new(spawn_server(Verify::new(cache), &addr)))
+                    }
+                }
+            }
+            None => match self.key {
+                Some(key) => Ok(Box::new(spawn_server(
+                    Verify::new(Encrypted::new(key, oss)),
+                    &addr,
+                ))),
+                None => Ok(Box::new(spawn_server(Verify::new(oss), &addr))),
+            },
+        }
+    }
+
+    pub async fn run(
+        self,
+        addr: SocketAddr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let server = self.spawn(addr).await?;
+        tracing::info!("Listening on {}", server.addr());
         server.await?;
         Ok(())
     }

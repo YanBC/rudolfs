@@ -22,6 +22,7 @@ mod disk;
 mod encrypt;
 #[cfg(feature = "faulty")]
 mod faulty;
+mod oss;
 mod retrying;
 mod s3;
 mod verify;
@@ -31,6 +32,7 @@ pub use disk::Backend as Disk;
 pub use encrypt::Backend as Encrypted;
 #[cfg(feature = "faulty")]
 pub use faulty::Backend as Faulty;
+pub use oss::Backend as Oss;
 pub use retrying::Backend as Retrying;
 pub use s3::Backend as S3;
 pub use verify::Backend as Verify;
