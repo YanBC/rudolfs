@@ -26,7 +26,7 @@ use core::task::{Context, Poll};
 use askama::Template;
 use futures::{
     future::{self, BoxFuture},
-    stream::TryStreamExt,
+    stream::{StreamExt, TryStreamExt},
 };
 
 use hyper::{
@@ -41,6 +41,10 @@ use crate::lfs;
 use crate::storage::{LFSObject, Namespace, Storage, StorageKey};
 use std::time::Duration;
 
+const MAX_JSON_BYTES: usize = 1024 * 1024;
+const MAX_BATCH_OBJECTS: usize = 1000;
+const MAX_BATCH_CONCURRENCY: usize = 16;
+
 const UPLOAD_EXPIRATION: Duration = Duration::from_secs(30 * 60);
 
 async fn from_json<T>(mut body: Body) -> Result<T, Error>
@@ -50,6 +54,9 @@ where
     let mut buf = Vec::new();
 
     while let Some(chunk) = body.try_next().await? {
+        if chunk.len() > MAX_JSON_BYTES.saturating_sub(buf.len()) {
+            return Err(anyhow::anyhow!("JSON body exceeds size limit"));
+        }
         buf.extend(chunk);
     }
 
@@ -129,6 +136,12 @@ where
                     .body(Body::from("Missing org/project in URL"))?);
             }
         };
+
+        if !namespace.is_valid() {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::from("Invalid org/project in URL"))?);
+        }
 
         match parts.next() {
             Some("object") => {
@@ -255,6 +268,11 @@ where
 
         match from_json::<lfs::BatchRequest>(req.into_body()).await {
             Ok(val) => {
+                if val.objects.len() > MAX_BATCH_OBJECTS {
+                    return Ok(Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(Body::from("Too many objects in batch"))?);
+                }
                 let operation = val.operation;
 
                 // For each object, check if it exists in the storage
@@ -267,15 +285,20 @@ where
                         let size = storage.size(&key).await;
 
                         let (namespace, _) = key.into_parts();
-                        Ok(basic_response(
-                            uri, &headers, &storage, object, operation, size,
-                            namespace,
+                        Ok::<_, Error>(
+                            basic_response(
+                                uri, &headers, &storage, object, operation,
+                                size, namespace,
+                            )
+                            .await,
                         )
-                        .await)
                     }
                 });
 
-                let objects = future::try_join_all(objects).await?;
+                let objects: Vec<_> = futures::stream::iter(objects)
+                    .buffered(MAX_BATCH_CONCURRENCY)
+                    .try_collect::<Vec<_>>()
+                    .await?;
                 let response = lfs::BatchResponse {
                     transfer: Some(lfs::Transfer::Basic),
                     objects,
@@ -357,6 +380,7 @@ where
         }
     };
 
+    let key = StorageKey::new(namespace.clone(), object.oid);
     match op {
         lfs::Operation::Upload => {
             // If the object does exist, then we should not return any action.
@@ -372,75 +396,78 @@ where
                     authenticated: Some(true),
                     actions: None,
                 },
-                None => lfs::ResponseObject {
-                    oid: object.oid,
-                    size: object.size,
-                    error: None,
-                    authenticated: Some(true),
-                    actions: Some(lfs::Actions {
-                        download: None,
-                        upload: Some(lfs::Action {
-                            href: storage
-                                .upload_url(
-                                    &StorageKey::new(
-                                        namespace.clone(),
-                                        object.oid,
-                                    ),
-                                    UPLOAD_EXPIRATION,
-                                )
-                                .await
-                                .unwrap_or_else(|| {
+                None => {
+                    let external =
+                        storage.upload_url(&key, UPLOAD_EXPIRATION).await;
+                    let upload_header = if external.is_none() {
+                        extract_auth_header(headers)
+                    } else {
+                        None
+                    };
+                    lfs::ResponseObject {
+                        oid: object.oid,
+                        size: object.size,
+                        error: None,
+                        authenticated: Some(true),
+                        actions: Some(lfs::Actions {
+                            download: None,
+                            upload: Some(lfs::Action {
+                                href: external.unwrap_or_else(|| {
                                     format!(
-                                        "{}api/{}/object/{}",
-                                        uri, namespace, object.oid
+                                        "{uri}api/{namespace}/object/{}",
+                                        object.oid
                                     )
                                 }),
-                            header: extract_auth_header(headers),
-                            expires_in: Some(upload_expiry_secs),
-                            expires_at: None,
+                                header: upload_header,
+                                expires_in: Some(upload_expiry_secs),
+                                expires_at: None,
+                            }),
+                            verify: Some(lfs::Action {
+                                href: format!(
+                                    "{uri}api/{namespace}/objects/verify"
+                                ),
+                                header: extract_auth_header(headers),
+                                expires_in: None,
+                                expires_at: None,
+                            }),
                         }),
-                        verify: Some(lfs::Action {
-                            href: format!(
-                                "{uri}api/{namespace}/objects/verify"
-                            ),
-                            header: extract_auth_header(headers),
-                            expires_in: None,
-                            expires_at: None,
-                        }),
-                    }),
-                },
+                    }
+                }
             }
         }
         lfs::Operation::Download => {
             // If the object does not exist, then we should return a 404 error
             // for this object.
             match size {
-                Some(size) => lfs::ResponseObject {
-                    oid: object.oid,
-                    size,
-                    error: None,
-                    authenticated: Some(true),
-                    actions: Some(lfs::Actions {
-                        download: Some(lfs::Action {
-                            href: storage
-                                .public_url(&StorageKey::new(
-                                    namespace.clone(),
-                                    object.oid,
-                                ))
-                                .unwrap_or_else(|| {
+                Some(size) => {
+                    let external = storage.public_url(&key);
+                    let download_header = if external.is_none() {
+                        extract_auth_header(headers)
+                    } else {
+                        None
+                    };
+                    lfs::ResponseObject {
+                        oid: object.oid,
+                        size,
+                        error: None,
+                        authenticated: Some(true),
+                        actions: Some(lfs::Actions {
+                            download: Some(lfs::Action {
+                                href: external.unwrap_or_else(|| {
                                     format!(
-                                        "{}api/{}/object/{}",
-                                        uri, namespace, object.oid
+                                        "{uri}api/{namespace}/object/{}",
+                                        object.oid
                                     )
                                 }),
-                            header: extract_auth_header(headers),
-                            expires_in: None,
-                            expires_at: None,
+                                header: download_header,
+                                expires_in: None,
+                                expires_at: None,
+                            }),
+                            upload: None,
+                            verify: None,
                         }),
-                        upload: None,
-                        verify: None,
-                    }),
-                },
+                    }
+                }
                 None => lfs::ResponseObject {
                     oid: object.oid,
                     size: object.size,
@@ -502,5 +529,131 @@ where
         } else {
             Box::pin(future::ready(Self::not_found(req)))
         }
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use crate::storage::{Disk, StorageStream};
+    use async_trait::async_trait;
+
+    struct ExternalUrls(Disk);
+
+    #[async_trait]
+    impl Storage for ExternalUrls {
+        type Error = io::Error;
+        async fn get(&self, key: &StorageKey) -> io::Result<Option<LFSObject>> {
+            self.0.get(key).await
+        }
+        async fn put(
+            &self,
+            key: StorageKey,
+            value: LFSObject,
+        ) -> io::Result<()> {
+            self.0.put(key, value).await
+        }
+        async fn size(&self, key: &StorageKey) -> io::Result<Option<u64>> {
+            self.0.size(key).await
+        }
+        async fn delete(&self, key: &StorageKey) -> io::Result<()> {
+            self.0.delete(key).await
+        }
+        fn list(&self) -> StorageStream<(StorageKey, u64), io::Error> {
+            self.0.list()
+        }
+        fn public_url(&self, _: &StorageKey) -> Option<String> {
+            Some("https://cdn.example/object".into())
+        }
+        async fn upload_url(
+            &self,
+            _: &StorageKey,
+            _: Duration,
+        ) -> Option<String> {
+            Some("https://storage.example/object?signed=true".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn external_actions_do_not_receive_origin_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = ExternalUrls(Disk::new(dir.path().into()).await.unwrap());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer test-token".parse().unwrap(),
+        );
+        for op in [lfs::Operation::Upload, lfs::Operation::Download] {
+            let size = match op {
+                lfs::Operation::Upload => None,
+                _ => Some(4),
+            };
+            let response = basic_response::<io::Error, _>(
+                "https://lfs.example/".parse().unwrap(),
+                &headers,
+                &storage,
+                lfs::RequestObject {
+                    oid: Default::default(),
+                    size: 4,
+                },
+                op,
+                Ok(size),
+                Namespace::new("org".into(), "project".into()),
+            )
+            .await;
+            let actions = response.actions.unwrap();
+            if let Some(upload) = actions.upload {
+                assert!(upload.header.is_none());
+                assert!(actions.verify.unwrap().header.is_some());
+            }
+            if let Some(download) = actions.download {
+                assert!(download.header.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_json_is_rejected_including_chunked_bodies() {
+        let chunks = futures::stream::iter([
+            Ok::<_, io::Error>(vec![b' '; MAX_JSON_BYTES]),
+            Ok(vec![b' '; 1]),
+        ]);
+        let err = from_json::<serde_json::Value>(Body::wrap_stream(chunks))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("size limit"));
+        assert!(
+            from_json::<serde_json::Value>(Body::from("{}"))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_namespaces_and_oversized_batches_are_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            std::sync::Arc::new(Disk::new(dir.path().into()).await.unwrap());
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/api/../../object/{}", "0".repeat(64)))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            App::api(storage.clone(), request).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+        let object = serde_json::json!({"oid": "0".repeat(64), "size": 0});
+        let body = serde_json::json!({"operation": "upload",
+            "objects": vec![object; MAX_BATCH_OBJECTS + 1]});
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/org/project/objects/batch")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        assert_eq!(
+            App::api(storage, request).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 }

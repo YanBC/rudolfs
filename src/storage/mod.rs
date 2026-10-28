@@ -70,8 +70,18 @@ pub struct Namespace {
 
 impl Namespace {
     pub fn new(org: String, project: String) -> Self {
-        // TODO: Ensure that the strings do not contain any illegal paths.
         Namespace { org, project }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        [&self.org, &self.project].into_iter().all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')
+                })
+        })
     }
 
     #[allow(unused)]

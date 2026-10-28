@@ -138,6 +138,12 @@ impl S3ServerBuilder {
         addr: SocketAddr,
     ) -> Result<Box<dyn Server + Unpin + Send>, Box<dyn std::error::Error>>
     {
+        if self.cdn.is_some() && self.key.is_some() {
+            return Err(anyhow::anyhow!(
+                "CDN mode cannot be combined with encryption"
+            )
+            .into());
+        }
         let prefix = self.prefix.unwrap_or_else(|| String::from("lfs"));
 
         if self.cdn.is_some() {
@@ -307,4 +313,19 @@ where
     });
 
     hyper::Server::bind(addr).serve(new_service)
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rejects_cdn_with_encryption_before_contacting_s3() {
+        let mut builder = S3ServerBuilder::new("unused".into());
+        builder.key([0; 32]).cdn("https://cdn.example".into());
+        match builder.spawn("127.0.0.1:0".parse().unwrap()).await {
+            Ok(_) => panic!("CDN and encryption must be incompatible"),
+            Err(err) => assert!(err.to_string().contains("cannot be combined")),
+        }
+    }
 }

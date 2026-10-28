@@ -148,6 +148,21 @@ To run in a production environment, it is easiest to use `docker-compose`:
  - The cache data is stored in a Docker volume named `rudolfs_data`. If you
    want to delete it, run `docker volume rm rudolfs_data`.
 
+## Request limits and storage safety
+
+Organization and project names must use ASCII letters, digits, dots, underscores,
+or hyphens; empty names and `.` or `..` are rejected. JSON request bodies are
+limited to 1 MiB, batches to 1,000 objects, and backend lookups to 16 concurrent
+operations per batch.
+
+CDN mode cannot be combined with an encryption key because direct transfers
+bypass server encryption. Origin authorization headers are only included in
+server-handled actions, not CDN or presigned storage actions.
+
+Failed and cancelled S3 uploads are aborted in the background. Configure an S3
+`AbortIncompleteMultipartUpload` lifecycle rule as well, to clean up uploads
+interrupted by process termination or failed abort requests.
+
 ## AWS Credentials
 
 AWS credentials must be provided to the server so that it can make requests to

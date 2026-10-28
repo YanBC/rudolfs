@@ -121,6 +121,36 @@ pub struct Backend {
     cdn: Option<String>,
 }
 
+// Abort incomplete uploads on errors and when the request future is cancelled.
+struct MultipartCleanup {
+    client: Client,
+    bucket: String,
+    key: String,
+    upload_id: String,
+    completed: bool,
+}
+
+impl Drop for MultipartCleanup {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let request = self
+            .client
+            .abort_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&self.key)
+            .upload_id(&self.upload_id);
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Err(err) = request.send().await {
+                    tracing::error!("Failed to abort multipart upload: {err}");
+                }
+            });
+        }
+    }
+}
+
 impl Backend {
     pub async fn new(
         bucket: String,
@@ -300,6 +330,14 @@ impl Storage for Backend {
         // either the SDK or S3 itself.
         let upload_id = mu_response.upload_id().unwrap().to_string();
 
+        let mut cleanup = MultipartCleanup {
+            client: self.client.clone(),
+            bucket: self.bucket.clone(),
+            key: self.key_to_path(&key),
+            upload_id: upload_id.clone(),
+            completed: false,
+        };
+
         // 100 MB
         const CHUNK_SIZE: usize = 100 * 1024 * 1024;
 
@@ -377,6 +415,7 @@ impl Storage for Backend {
         })
         .await?;
 
+        cleanup.completed = true;
         Ok(())
     }
 
@@ -442,5 +481,105 @@ impl Storage for Backend {
             .ok()?;
 
         Some(presigned_request.uri().to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper::{
+        Body, Response,
+        service::{make_service_fn, service_fn},
+    };
+    use std::convert::Infallible;
+    use std::sync::{Arc, Mutex};
+
+    #[tokio::test]
+    async fn failed_stream_aborts_multipart_upload() {
+        exercise_cleanup(false).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_request_aborts_multipart_upload() {
+        exercise_cleanup(true).await;
+    }
+
+    async fn exercise_cleanup(cancel: bool) {
+        let (abort_tx, abort_rx) = tokio::sync::oneshot::channel();
+        let abort_tx = Arc::new(Mutex::new(Some(abort_tx)));
+        let service = make_service_fn(move |_| {
+            let abort_tx = abort_tx.clone();
+            async move {
+                Ok::<_, Infallible>(service_fn(move |req| {
+                    let abort_tx = abort_tx.clone();
+                    async move {
+                        let body = if req.method() == hyper::Method::DELETE {
+                            assert!(
+                                req.uri()
+                                    .query()
+                                    .unwrap()
+                                    .contains("uploadId=test-upload")
+                            );
+                            if let Some(tx) = abort_tx.lock().unwrap().take() {
+                                let _ = tx.send(());
+                            }
+                            ""
+                        } else {
+                            "<InitiateMultipartUploadResult><Bucket>test</Bucket><Key>key</Key><UploadId>test-upload</UploadId></InitiateMultipartUploadResult>"
+                        };
+                        Ok::<_, Infallible>(Response::new(Body::from(body)))
+                    }
+                }))
+            }
+        });
+        let server =
+            hyper::Server::bind(&"127.0.0.1:0".parse().unwrap()).serve(service);
+        let endpoint = format!("http://{}", server.local_addr());
+        let server = tokio::spawn(server);
+        let config = aws_sdk_s3::config::Builder::new()
+            .behavior_version(BehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .credentials_provider(aws_sdk_s3::config::Credentials::new(
+                "test", "test", None, None, "test",
+            ))
+            .endpoint_url(endpoint)
+            .force_path_style(true)
+            .build();
+        let storage = Backend {
+            client: Client::from_conf(config),
+            bucket: "test".into(),
+            prefix: "lfs".into(),
+            cdn: None,
+        };
+        let key = StorageKey::new(
+            super::super::Namespace::new("org".into(), "project".into()),
+            Default::default(),
+        );
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let stream = futures::stream::once(async move {
+            let _ = started_tx.send(());
+            if cancel {
+                futures::future::pending::<()>().await;
+            }
+            Err(std::io::Error::other("broken upload"))
+        });
+        let upload = tokio::spawn(async move {
+            storage.put(key, LFSObject::new(4, Box::pin(stream))).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        if cancel {
+            upload.abort();
+            assert!(upload.await.unwrap_err().is_cancelled());
+        } else {
+            assert!(upload.await.unwrap().is_err());
+        }
+        tokio::time::timeout(Duration::from_secs(5), abort_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        server.abort();
     }
 }

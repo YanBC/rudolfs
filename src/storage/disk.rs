@@ -50,12 +50,18 @@ impl Backend {
 
     // Use sub directories in order to better utilize the file system's internal
     // tree data structure.
-    fn key_to_path(&self, key: &StorageKey) -> PathBuf {
-        self.root.join(format!(
+    fn key_to_path(&self, key: &StorageKey) -> Result<PathBuf, io::Error> {
+        if !key.namespace().is_valid() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid object namespace",
+            ));
+        }
+        Ok(self.root.join(format!(
             "objects/{}/{}",
             key.namespace(),
             key.oid().path()
-        ))
+        )))
     }
 }
 
@@ -67,7 +73,7 @@ impl Storage for Backend {
         &self,
         key: &StorageKey,
     ) -> Result<Option<LFSObject>, Self::Error> {
-        let file = match fs::File::open(self.key_to_path(key)).await {
+        let file = match fs::File::open(self.key_to_path(key)?).await {
             Ok(file) => file,
             Err(err) => {
                 if err.kind() == io::ErrorKind::NotFound {
@@ -91,7 +97,7 @@ impl Storage for Backend {
         key: StorageKey,
         value: LFSObject,
     ) -> Result<(), Self::Error> {
-        let path = self.key_to_path(&key);
+        let path = self.key_to_path(&key)?;
         let dir = path.parent().unwrap().to_path_buf();
 
         let (len, stream) = value.into_parts();
@@ -126,7 +132,7 @@ impl Storage for Backend {
     }
 
     async fn size(&self, key: &StorageKey) -> Result<Option<u64>, Self::Error> {
-        let path = self.key_to_path(key);
+        let path = self.key_to_path(key)?;
 
         fs::metadata(path)
             .await
@@ -141,7 +147,7 @@ impl Storage for Backend {
         // TODO: Attempt to delete the parent folder(s)? This would keep the
         // directory tree clean but it could also cause a race condition when
         // directories are created during `put` operations.
-        fs::remove_file(self.key_to_path(key))
+        fs::remove_file(self.key_to_path(key)?)
             .await
             .or_else(move |err| match err.kind() {
                 io::ErrorKind::NotFound => Ok(()),
@@ -184,7 +190,10 @@ impl Storage for Backend {
                         let mut tier2 = fs::read_dir(entry.path()).await?;
 
                         while let Some(entry) = tier2.next_entry().await? {
-                            yield entry;
+                            let mut objects = fs::read_dir(entry.path()).await?;
+                            while let Some(entry) = objects.next_entry().await? {
+                                yield entry;
+                            }
                         }
                     }
                 }
@@ -305,5 +314,62 @@ impl Encoder<Bytes> for BytesCodec {
         buf.reserve(len);
         buf.put(data);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rejects_paths_outside_the_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Backend::new(dir.path().into()).await.unwrap();
+        for org in ["..", ".", "", "/tmp", "a/b", "a\\b", "%2e%2e"] {
+            let key = StorageKey::new(
+                Namespace::new(org.into(), "project".into()),
+                Oid::default(),
+            );
+            assert_eq!(
+                storage.size(&key).await.unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn lists_persisted_objects_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = StorageKey::new(
+            Namespace::new("org".into(), "project".into()),
+            Oid::default(),
+        );
+        let storage = Backend::new(dir.path().into()).await.unwrap();
+        storage
+            .put(
+                key.clone(),
+                LFSObject::new(
+                    4,
+                    Box::pin(futures::stream::once(async {
+                        Ok(Bytes::from_static(b"test"))
+                    })),
+                ),
+            )
+            .await
+            .unwrap();
+        drop(storage);
+        let storage = Backend::new(dir.path().into()).await.unwrap();
+        let entries: Vec<_> = storage.list().try_collect().await.unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].0 == key);
+        assert_eq!(entries[0].1, 4);
+        let cache = super::super::Cached::new(
+            1,
+            storage,
+            Backend::new(dir.path().join("permanent")).await.unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(cache.total_size().await, Some(0));
     }
 }
